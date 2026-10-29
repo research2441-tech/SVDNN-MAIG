@@ -1,0 +1,13 @@
+# Python >= 3.10. Versions used to produce the reported results are written to
+# outputs/<mode>/run_manifest.json at run time.
+numpy>=1.26
+pandas>=2.1
+scipy>=1.11
+scikit-learn>=1.4
+torch>=2.2
+xgboost>=2.0
+optuna>=3.5
+matplotlib>=3.8
+pyyaml>=6.0
+tabulate>=0.9
+pytest>=7.4

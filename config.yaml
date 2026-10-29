@@ -1,0 +1,162 @@
+# =============================================================================
+# SVDNN-MAIG : single source of truth for every parameter used in the study.
+# Every number reported in the manuscript is produced by the code using the
+# values below. Changing a value here changes the corresponding experiment.
+# =============================================================================
+
+seed: 2026                     # master seed; all other seeds are derived from it
+output_dir: outputs            # created at run time (git-ignored)
+n_workers: null                # outer folds run in parallel (null = half of the CPU cores)
+n_threads: null                # CPU threads per worker for torch / RF / XGBoost (null = cores / workers)
+
+# -----------------------------------------------------------------------------
+# 1. Synthetic cohort (see DATA_GENERATION.md for the full structural model)
+# -----------------------------------------------------------------------------
+data:
+  n_source: 160000             # simulated post-COVID source population
+  n_cases: 4400                # incident T2DM cases drawn into the study sample
+  n_controls: 9200             # non-cases drawn into the study sample
+  followup_years: 1.0          # T2 -> T3 outcome window
+  t_years: [0.0, 0.25, 1.0]    # time of T0 (pre-infection), T1, T2 relative to infection
+  ada_hba1c: 6.5               # ADA diagnostic threshold, %   (outcome definition at T3)
+  ada_fpg: 126.0               # ADA diagnostic threshold, mg/dL
+  ehr_unit_error_rate: 0.002   # FPG recorded in mmol/L, HbA1c in mmol/mol (EHR artefacts)
+  mcar_rate: 0.01              # MCAR missingness on routine labs/anthropometrics
+
+# Physiological plausibility ranges; values outside are set to missing before
+# imputation (applied inside each training fold, never on the full data).
+plausible_ranges:
+  bmi: [13.0, 75.0]
+  hba1c: [3.5, 18.0]
+  fpg: [40.0, 600.0]
+  crp: [0.01, 300.0]
+  il6: [0.1, 1000.0]
+  ferritin: [2.0, 5000.0]
+  physical_activity: [0.0, 200.0]
+  sleep_quality: [1.0, 10.0]
+  waist_cm: [50.0, 200.0]
+  sbp: [70.0, 260.0]
+  dbp: [35.0, 150.0]
+  triglycerides: [20.0, 3000.0]
+  hdl_cholesterol: [10.0, 150.0]
+  ldl_cholesterol: [20.0, 400.0]
+  fasting_insulin: [0.5, 300.0]
+
+# -----------------------------------------------------------------------------
+# 2. MAIG feature ranking / selection
+# -----------------------------------------------------------------------------
+maig:
+  n_thresholds: 19             # k quantile thresholds (5%, 10%, ..., 95%)
+  balanced: true               # prior-balanced entropy (prevalence invariance)
+  redundancy_eta: 0.5          # eta in the redundancy-adjusted greedy selection
+  gamma_grid: [0.02, 0.05, 0.10, 0.15, 0.20]   # gamma chosen on the inner validation split
+  min_features: 5
+
+# -----------------------------------------------------------------------------
+# 3. Evaluation protocol (identical for every model)
+# -----------------------------------------------------------------------------
+cv:
+  outer_folds: 5               # stratified K-fold
+  outer_repeats: 5             # repeated with different shuffles -> 25 held-out evaluations per model
+  inner_val_fraction: 0.20     # inner split of each outer-training set (tuning, early stopping, threshold)
+  oversample: true             # Gaussian-noise bootstrap oversampling of cases (Eq. 17), training only
+  noise_eta: [0.01, 0.05]
+  threshold_rule: youden       # decision threshold chosen on the inner validation split
+  population_prevalence: null  # null -> use the source-cohort incidence written by the generator
+
+tuning:
+  n_trials: 12                 # equal Bayesian-optimisation (TPE) budget for every model
+  objective: roc_auc           # inner-validation objective
+
+training:                      # shared by all neural models
+  max_epochs: 120
+  patience: 15
+  batch_size: 256
+  lr_scheduler_patience: 5
+  lr_scheduler_factor: 0.5
+
+models: [logistic_regression, random_forest, xgboost, svm_rbf, mlp, lstm_rnn, cnn_lstm, svdnn]
+proposed: svdnn
+
+ablations: [svdnn_no_maig, svdnn_no_margin, svdnn_margin_unsupervised, svdnn_no_diversity,
+            svdnn_no_skip, svdnn_no_jacobian, svdnn_margin_only, mlp_output_hinge]
+selector_comparison: [maig, information_gain, mutual_information, relieff, mrmr, anova_f]
+
+# -----------------------------------------------------------------------------
+# 4. Hyper-parameter search spaces (Optuna TPE)
+# -----------------------------------------------------------------------------
+search_space:
+  logistic_regression: {C: [0.001, 100.0, log]}
+  random_forest: {n_estimators: [200, 600, int], max_depth: [3, 20, int], min_samples_leaf: [1, 20, int], max_features: [0.1, 0.6, float]}
+  xgboost: {n_estimators: [150, 700, int], max_depth: [2, 8, int], learning_rate: [0.01, 0.3, log], subsample: [0.6, 1.0, float],
+            colsample_bytree: [0.5, 1.0, float], min_child_weight: [1, 10, int], reg_lambda: [0.001, 10.0, log]}
+  svm_rbf: {C: [0.1, 100.0, log], gamma: [0.0001, 0.1, log]}
+  mlp: {lr: [0.0001, 0.003, log], width: [32, 256, int], depth: [2, 4, int], dropout: [0.0, 0.4, float], weight_decay: [0.000001, 0.001, log]}
+  lstm_rnn: {lr: [0.0001, 0.003, log], hidden: [16, 96, int], dropout: [0.0, 0.4, float], weight_decay: [0.000001, 0.001, log]}
+  cnn_lstm: {lr: [0.0001, 0.003, log], filters: [16, 64, int], hidden: [16, 96, int], dropout: [0.0, 0.4, float], weight_decay: [0.000001, 0.001, log]}
+  svdnn: {lr: [0.0001, 0.003, log], width: [32, 256, int], depth: [2, 4, int], dropout: [0.0, 0.4, float], weight_decay: [0.000001, 0.001, log],
+          n_margin: [8, 32, int], C: [1.0, 50.0, log], alpha: [0.05, 1.0, log], mu: [0.001, 1.0, log], lam: [0.0001, 0.1, log]}
+
+# -----------------------------------------------------------------------------
+# 5. Explainability and counterfactuals
+# -----------------------------------------------------------------------------
+explain:
+  ig_steps: 32
+  deletion_random_orders: 10
+  max_counterfactuals_per_fold: 150
+  cf_steps: 300
+  cf_lr: 0.05
+  # actionable variables (T2 values only) and maximum feasible change within 12 months
+  actionable:
+    bmi_t2: {direction: decrease, max_rel_change: 0.10, floor: 18.5}
+    physical_activity_t2: {direction: increase, max_rel_change: 1.50, ceiling: 80.0}
+    sleep_quality_t2: {direction: increase, max_abs_change: 2.0, ceiling: 10.0}
+    diet_quality: {direction: increase, max_abs_change: 3.0, ceiling: 10.0}
+    screen_time: {direction: decrease, max_rel_change: 0.50, floor: 0.5}
+  coupled: {waist_cm: {driver: bmi_t2, slope: 2.4}}   # waist follows BMI (cm per kg/m2)
+
+# -----------------------------------------------------------------------------
+# 6. Controlled MAIG robustness study (Reviewer comment 8)
+# -----------------------------------------------------------------------------
+robustness:
+  n_samples: 4000
+  n_informative: 10
+  n_redundant: 10
+  n_noise: 30
+  replicates: 20
+  prevalence: [0.50, 0.30, 0.15, 0.05]
+  label_noise: [0.0, 0.05, 0.10, 0.20]
+  correlation: [0.0, 0.5, 0.8]
+  feature_noise: [0.0, 0.5, 1.0]
+
+# -----------------------------------------------------------------------------
+# 7. Statistics
+# -----------------------------------------------------------------------------
+stats:
+  alpha: 0.05
+  n_bootstrap: 2000
+  compare_metrics: [roc_auc, pr_auc, f1, mcc, recall, specificity, brier]
+
+# -----------------------------------------------------------------------------
+# 8. Real-data external validation (Reviewer comment 3)
+# -----------------------------------------------------------------------------
+external:
+  pima_url: https://raw.githubusercontent.com/jbrownlee/Datasets/master/pima-indians-diabetes.data.csv
+  brfss_csv: null              # path to diabetes_binary_health_indicators_BRFSS2015.csv (optional)
+  brfss_subsample: 30000
+  models: [logistic_regression, random_forest, xgboost, svm_rbf, mlp, svdnn]
+
+# -----------------------------------------------------------------------------
+# 9. Run modes. "quick" is a smoke test (minutes); "full" reproduces the paper.
+# -----------------------------------------------------------------------------
+modes:
+  quick:
+    data: {n_source: 40000, n_cases: 900, n_controls: 1900}
+    cv: {outer_folds: 3, outer_repeats: 1}
+    tuning: {n_trials: 2}
+    training: {max_epochs: 25, patience: 5}
+    robustness: {replicates: 2, n_samples: 1500}
+    explain: {max_counterfactuals_per_fold: 30, cf_steps: 120}
+    stats: {n_bootstrap: 300}
+    external: {brfss_subsample: 5000}
+  full: {}
